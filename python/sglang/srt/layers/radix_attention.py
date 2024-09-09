@@ -18,7 +18,9 @@ limitations under the License.
 from typing import Optional
 
 import torch
-from flashinfer.cascade import merge_state
+card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
+if 'NVIDIA' in card_name:
+    from flashinfer.cascade import merge_state
 from torch import nn
 
 from sglang.global_config import global_config

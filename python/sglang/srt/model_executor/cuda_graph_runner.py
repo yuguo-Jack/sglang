@@ -20,8 +20,10 @@ from contextlib import contextmanager
 from typing import Callable, List
 
 import torch
-from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
+card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
+if 'NVIDIA' in card_name:
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
 from vllm.distributed.parallel_state import graph_capture
 from vllm.model_executor.custom_op import CustomOp
 
@@ -82,10 +84,13 @@ def set_torch_compile_config():
 
     torch._inductor.config.coordinate_descent_tuning = True
     torch._inductor.config.triton.unique_kernel_names = True
-    torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
-
-    # FIXME: tmp workaround
-    torch._dynamo.config.accumulated_cache_size_limit = 1024
+    if 'NVIDIA' in card_name:
+        torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
+    
+        # FIXME: tmp workaround
+        torch._dynamo.config.accumulated_cache_size_limit = 1024
+    else:
+        torch._dynamo.config.suppress_errors = True
 
 
 class CudaGraphRunner:
@@ -118,35 +123,36 @@ class CudaGraphRunner:
             (self.max_bs,), dtype=torch.int32, device="cuda"
         )
 
-        # FlashInfer inputs
-        self.flashinfer_kv_indptr = torch.zeros(
-            (self.max_bs + 1,), dtype=torch.int32, device="cuda"
-        )
-        self.flashinfer_kv_indices = torch.zeros(
-            (self.max_bs * model_runner.model_config.context_len,),
-            dtype=torch.int32,
-            device="cuda",
-        )
-        self.flashinfer_kv_last_page_len = torch.ones(
-            (self.max_bs,), dtype=torch.int32, device="cuda"
-        )
-        if model_runner.sliding_window_size is None:
-            self.flashinfer_workspace_buffer = (
-                self.model_runner.flashinfer_workspace_buffer
+        if 'NVIDIA' in card_name:
+            # FlashInfer inputs
+            self.flashinfer_kv_indptr = torch.zeros(
+                (self.max_bs + 1,), dtype=torch.int32, device="cuda"
             )
-        else:
-            self.flashinfer_workspace_buffer = (
-                self.model_runner.flashinfer_workspace_buffer
+            self.flashinfer_kv_indices = torch.zeros(
+                (self.max_bs * model_runner.model_config.context_len,),
+                dtype=torch.int32,
+                device="cuda",
             )
-
-            self.flashinfer_kv_indptr = [
-                self.flashinfer_kv_indptr,
-                self.flashinfer_kv_indptr.clone(),
-            ]
-            self.flashinfer_kv_indices = [
-                self.flashinfer_kv_indices,
-                self.flashinfer_kv_indices.clone(),
-            ]
+            self.flashinfer_kv_last_page_len = torch.ones(
+                (self.max_bs,), dtype=torch.int32, device="cuda"
+            )
+            if model_runner.sliding_window_size is None:
+                self.flashinfer_workspace_buffer = (
+                    self.model_runner.flashinfer_workspace_buffer
+                )
+            else:
+                self.flashinfer_workspace_buffer = (
+                    self.model_runner.flashinfer_workspace_buffer
+                )
+    
+                self.flashinfer_kv_indptr = [
+                    self.flashinfer_kv_indptr,
+                    self.flashinfer_kv_indptr.clone(),
+                ]
+                self.flashinfer_kv_indices = [
+                    self.flashinfer_kv_indices,
+                    self.flashinfer_kv_indices.clone(),
+                ]
 
         # Sampling inputs
         vocab_size = model_runner.model_config.vocab_size
@@ -182,7 +188,8 @@ class CudaGraphRunner:
                     self.graphs[bs] = graph
                     self.input_buffers[bs] = input_buffers
                     self.output_buffers[bs] = output_buffers
-                    self.flashinfer_handlers[bs] = flashinfer_handler
+                    if 'NVIDIA' in card_name:
+                        self.flashinfer_handlers[bs] = flashinfer_handler
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
         graph = torch.cuda.CUDAGraph()
@@ -195,66 +202,89 @@ class CudaGraphRunner:
         position_ids_offsets = self.position_ids_offsets[:bs]
         out_cache_loc = self.out_cache_loc[:bs]
 
-        # FlashInfer inputs
-        if not _grouped_size_compiled_for_decode_kernels(
-            self.model_runner.model_config.num_attention_heads
-            // self.model_runner.tp_size,
-            self.model_runner.model_config.get_num_kv_heads(self.model_runner.tp_size),
-        ):
-            use_tensor_cores = True
-        else:
-            use_tensor_cores = False
-        if self.model_runner.sliding_window_size is None:
-            flashinfer_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                self.flashinfer_workspace_buffer,
-                "NHD",
-                use_cuda_graph=True,
-                use_tensor_cores=use_tensor_cores,
-                paged_kv_indptr_buffer=self.flashinfer_kv_indptr[: bs + 1],
-                paged_kv_indices_buffer=self.flashinfer_kv_indices,
-                paged_kv_last_page_len_buffer=self.flashinfer_kv_last_page_len[:bs],
-            )
-        else:
-            flashinfer_decode_wrapper = []
-            for i in range(2):
-                flashinfer_decode_wrapper.append(
-                    BatchDecodeWithPagedKVCacheWrapper(
-                        self.flashinfer_workspace_buffer,
-                        "NHD",
-                        use_cuda_graph=True,
-                        use_tensor_cores=use_tensor_cores,
-                        paged_kv_indptr_buffer=self.flashinfer_kv_indptr[i][: bs + 1],
-                        paged_kv_indices_buffer=self.flashinfer_kv_indices[i],
-                        paged_kv_last_page_len_buffer=self.flashinfer_kv_last_page_len[
-                            :bs
-                        ],
-                    )
+        triton_start_loc = torch.zeros_like(self.seq_lens, dtype=torch.int32)
+        triton_start_loc[1:] = torch.cumsum(self.seq_lens[:-1], dim=0)
+
+        if 'NVIDIA' in card_name:
+            # FlashInfer inputs
+            if not _grouped_size_compiled_for_decode_kernels(
+                self.model_runner.model_config.num_attention_heads
+                // self.model_runner.tp_size,
+                self.model_runner.model_config.get_num_kv_heads(self.model_runner.tp_size),
+            ):
+                use_tensor_cores = True
+            else:
+                use_tensor_cores = False
+            if self.model_runner.sliding_window_size is None:
+                flashinfer_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                    self.flashinfer_workspace_buffer,
+                    "NHD",
+                    use_cuda_graph=True,
+                    use_tensor_cores=use_tensor_cores,
+                    paged_kv_indptr_buffer=self.flashinfer_kv_indptr[: bs + 1],
+                    paged_kv_indices_buffer=self.flashinfer_kv_indices,
+                    paged_kv_last_page_len_buffer=self.flashinfer_kv_last_page_len[:bs],
                 )
-        update_flashinfer_indices(
-            ForwardMode.DECODE,
-            self.model_runner,
-            req_pool_indices,
-            seq_lens,
-            None,
-            flashinfer_decode_wrapper,
-        )
+            else:
+                flashinfer_decode_wrapper = []
+                for i in range(2):
+                    flashinfer_decode_wrapper.append(
+                        BatchDecodeWithPagedKVCacheWrapper(
+                            self.flashinfer_workspace_buffer,
+                            "NHD",
+                            use_cuda_graph=True,
+                            use_tensor_cores=use_tensor_cores,
+                            paged_kv_indptr_buffer=self.flashinfer_kv_indptr[i][: bs + 1],
+                            paged_kv_indices_buffer=self.flashinfer_kv_indices[i],
+                            paged_kv_last_page_len_buffer=self.flashinfer_kv_last_page_len[
+                                :bs
+                            ],
+                        )
+                    )
+            update_flashinfer_indices(
+                ForwardMode.DECODE,
+                self.model_runner,
+                req_pool_indices,
+                seq_lens,
+                None,
+                flashinfer_decode_wrapper,
+            )
 
         # Run and capture
         def run_once():
-            input_metadata = InputMetadata(
-                forward_mode=ForwardMode.DECODE,
-                sampling_info=self.sampling_info[:bs],
-                batch_size=bs,
-                req_pool_indices=req_pool_indices,
-                seq_lens=seq_lens,
-                req_to_token_pool=self.model_runner.req_to_token_pool,
-                token_to_kv_pool=self.model_runner.token_to_kv_pool,
-                out_cache_loc=out_cache_loc,
-                return_logprob=False,
-                top_logprobs_nums=0,
-                positions=(seq_lens - 1 + position_ids_offsets).to(torch.int64),
-                flashinfer_decode_wrapper=flashinfer_decode_wrapper,
-            )
+            if 'NVIDIA' in card_name:
+                input_metadata = InputMetadata(
+                    forward_mode=ForwardMode.DECODE,
+                    sampling_info=self.sampling_info[:bs],
+                    batch_size=bs,
+                    req_pool_indices=req_pool_indices,
+                    seq_lens=seq_lens,
+                    req_to_token_pool=self.model_runner.req_to_token_pool,
+                    token_to_kv_pool=self.model_runner.token_to_kv_pool,
+                    out_cache_loc=out_cache_loc,
+                    return_logprob=False,
+                    top_logprobs_nums=0,
+                    positions=(seq_lens - 1 + position_ids_offsets).to(torch.int64),
+                    flashinfer_decode_wrapper=flashinfer_decode_wrapper,
+                )
+            else:
+                input_metadata = InputMetadata(
+                    forward_mode=ForwardMode.DECODE,
+                    sampling_info=self.sampling_info[:bs],
+                    batch_size=bs,
+                    req_pool_indices=req_pool_indices,
+                    seq_lens=seq_lens,
+                    req_to_token_pool=self.model_runner.req_to_token_pool,
+                    token_to_kv_pool=self.model_runner.token_to_kv_pool,
+                    out_cache_loc=out_cache_loc,
+                    total_num_tokens=int(torch.sum(seq_lens)),
+                    return_logprob=False,
+                    top_logprobs_nums=0,
+                    positions=(seq_lens - 1 + position_ids_offsets).to(torch.int64),
+                    triton_max_seq_len=int(torch.max(seq_lens)),
+                    triton_start_loc=triton_start_loc,
+                    triton_max_extend_len=None,
+                )
 
             return forward(input_ids, input_metadata.positions, input_metadata)
 
@@ -277,7 +307,10 @@ class CudaGraphRunner:
         self.model_runner.tp_group.barrier()
 
         self.graph_memory_pool = graph.pool()
-        return graph, None, out, flashinfer_decode_wrapper
+        if 'NVIDIA' in card_name:
+            return graph, None, out, flashinfer_decode_wrapper
+        else:
+            return graph, None, out, None
 
     def replay(self, batch: ScheduleBatch):
         assert batch.out_cache_loc is not None
@@ -297,16 +330,17 @@ class CudaGraphRunner:
         self.seq_lens[:raw_bs] = batch.seq_lens
         self.position_ids_offsets[:raw_bs] = batch.position_ids_offsets
         self.out_cache_loc[:raw_bs] = batch.out_cache_loc
-
-        # FlashInfer inputs
-        update_flashinfer_indices(
-            ForwardMode.DECODE,
-            self.model_runner,
-            self.req_pool_indices[:bs],
-            self.seq_lens[:bs],
-            None,
-            self.flashinfer_handlers[bs],
-        )
+        
+        if 'NVIDIA' in card_name:
+            # FlashInfer inputs
+            update_flashinfer_indices(
+                ForwardMode.DECODE,
+                self.model_runner,
+                self.req_pool_indices[:bs],
+                self.seq_lens[:bs],
+                None,
+                self.flashinfer_handlers[bs],
+            )
 
         # Sampling inputs
         self.sampling_info.inplace_assign(raw_bs, batch.sampling_info)

@@ -339,6 +339,8 @@ def launch_server(
     else:
         start_controller_process = start_controller_process_multi
 
+    mp.set_start_method('spawn')
+
     proc_controller = mp.Process(
         target=start_controller_process,
         args=(server_args, port_args, pipe_controller_writer, model_override_args),

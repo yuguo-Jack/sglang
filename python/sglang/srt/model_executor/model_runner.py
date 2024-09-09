@@ -25,12 +25,14 @@ from typing import Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
-from flashinfer import (
-    BatchDecodeWithPagedKVCacheWrapper,
-    BatchPrefillWithPagedKVCacheWrapper,
-    BatchPrefillWithRaggedKVCacheWrapper,
-)
-from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
+card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
+if 'NVIDIA' in card_name:
+    from flashinfer import (
+        BatchDecodeWithPagedKVCacheWrapper,
+        BatchPrefillWithPagedKVCacheWrapper,
+        BatchPrefillWithRaggedKVCacheWrapper,
+    )
+    from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
 from vllm.config import DeviceConfig, LoadConfig
 from vllm.config import ModelConfig as VllmModelConfig
 from vllm.distributed import (
@@ -107,6 +109,8 @@ class ModelRunner:
             server_args.mem_fraction_static *= 0.95
 
         min_per_gpu_memory = self.init_torch_distributed()
+        # Monkey patch model loader
+        setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
         self.load_model()
         self.init_memory_pool(
             min_per_gpu_memory,
@@ -205,6 +209,7 @@ class ModelRunner:
             model_config=self.vllm_model_config,
             load_config=self.load_config,
             device_config=self.device_config,
+            multimodal_config=None,
             parallel_config=None,
             scheduler_config=None,
             lora_config=None,
@@ -490,7 +495,7 @@ class ModelRunner:
 
         from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 
-        if self.server_args.disable_cuda_graph or self.server_args.disable_flashinfer:
+        if self.server_args.disable_cuda_graph or (self.server_args.disable_flashinfer and 'NVIDIA' in card_name):
             self.cuda_graph_runner = None
             return
 
@@ -621,5 +626,5 @@ def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
     return model_arch_name_to_cls[model_arch]
 
 
-# Monkey patch model loader
-setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
+# # Monkey patch model loader
+# setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
