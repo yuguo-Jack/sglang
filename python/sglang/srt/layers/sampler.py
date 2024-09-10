@@ -78,6 +78,7 @@ class Sampler(CustomOp):
 
         probs = self._get_probs(logits, sampling_info)
 
+        # fix dcu compile bug
         if self.is_torch_compile:
             vs = probs.shape[-1]
             probs = probs.view(-1, vs)
