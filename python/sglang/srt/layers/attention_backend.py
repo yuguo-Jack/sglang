@@ -12,13 +12,15 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from flashinfer import (
-    BatchDecodeWithPagedKVCacheWrapper,
-    BatchPrefillWithPagedKVCacheWrapper,
-    BatchPrefillWithRaggedKVCacheWrapper,
-)
-from flashinfer.cascade import merge_state
-from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
+card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
+if 'NVIDIA' in card_name:
+    from flashinfer import (
+        BatchDecodeWithPagedKVCacheWrapper,
+        BatchPrefillWithPagedKVCacheWrapper,
+        BatchPrefillWithRaggedKVCacheWrapper,
+    )
+    from flashinfer.cascade import merge_state
+    from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
 
 from sglang.global_config import global_config
 from sglang.srt.layers.flashinfer_utils import update_flashinfer_indices

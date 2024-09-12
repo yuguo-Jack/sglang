@@ -1,11 +1,9 @@
 import pytest
 import torch
-card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
-if 'NVIDIA' in card_name:
-    from flashinfer import (
-        BatchDecodeWithPagedKVCacheWrapper,
-        BatchPrefillWithPagedKVCacheWrapper,
-    )
+from flashinfer import (
+    BatchDecodeWithPagedKVCacheWrapper,
+    BatchPrefillWithPagedKVCacheWrapper,
+)
 from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
 
 from sglang.srt.layers.token_attention import token_attention_fwd
