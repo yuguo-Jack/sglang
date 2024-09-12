@@ -90,6 +90,7 @@ def set_torch_compile_config():
         torch._dynamo.config.accumulated_cache_size_limit = 1024
     else:
         torch._dynamo.config.suppress_errors = True
+        torch._dynamo.config.cache_size_limit = 256
 
 
 class CudaGraphRunner:
