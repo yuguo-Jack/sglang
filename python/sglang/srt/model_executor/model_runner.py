@@ -18,7 +18,6 @@ limitations under the License.
 import gc
 import importlib
 import importlib.resources
-import json
 import logging
 import pkgutil
 from functools import lru_cache
@@ -26,14 +25,6 @@ from typing import Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
-card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
-if 'NVIDIA' in card_name:
-    from flashinfer import (
-        BatchDecodeWithPagedKVCacheWrapper,
-        BatchPrefillWithPagedKVCacheWrapper,
-        BatchPrefillWithRaggedKVCacheWrapper,
-    )
-    from flashinfer.decode import _grouped_size_compiled_for_decode_kernels
 from vllm.config import DeviceConfig, LoadConfig
 from vllm.config import ModelConfig as VllmModelConfig
 from vllm.distributed import (
@@ -46,7 +37,8 @@ from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import ModelRegistry
 
-from sglang.global_config import global_config
+from sglang.srt.configs.model_config import AttentionArch, ModelConfig
+from sglang.srt.layers.attention_backend import FlashInferAttnBackend, TritonAttnBackend
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.sampler import SampleOutput
 from sglang.srt.managers.schedule_batch import ScheduleBatch, global_server_args_dict
@@ -55,8 +47,7 @@ from sglang.srt.mem_cache.memory_pool import (
     MLATokenToKVPool,
     ReqToTokenPool,
 )
-from sglang.srt.model_config import AttentionArch, ModelConfig
-from sglang.srt.model_executor.forward_batch_info import ForwardMode, InputMetadata
+from sglang.srt.model_executor.forward_batch_info import InputMetadata
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     get_available_gpu_memory,
@@ -72,6 +63,8 @@ logger = logging.getLogger(__name__)
 
 
 class ModelRunner:
+    """ModelRunner runs the forward passes of the models."""
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -95,14 +88,15 @@ class ModelRunner:
         )
         global_server_args_dict.update(
             {
-                "disable_flashinfer": server_args.disable_flashinfer,
-                "disable_flashinfer_sampling": server_args.disable_flashinfer_sampling,
+                "attention_backend": server_args.attention_backend,
+                "sampling_backend": server_args.sampling_backend,
                 "triton_attention_reduce_in_fp32": server_args.triton_attention_reduce_in_fp32,
                 "enable_mla": server_args.enable_mla,
                 "torchao_config": server_args.torchao_config,
             }
         )
 
+        # Model-specific adjustment
         if self.is_multimodal_model:
             logger.info(
                 "Automatically turn off --chunked-prefill-size and adjust --mem-fraction-static for multimodal models."
@@ -110,17 +104,18 @@ class ModelRunner:
             server_args.chunked_prefill_size = None
             server_args.mem_fraction_static *= 0.95
 
+        # Init componnets
         min_per_gpu_memory = self.init_torch_distributed()
         # Monkey patch model loader
         setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
         self.load_model()
         self.init_memory_pool(
             min_per_gpu_memory,
-            server_args.max_num_reqs,
+            server_args.max_running_requests,
             server_args.max_total_tokens,
         )
         self.init_cublas()
-        self.init_flashinfer()
+        self.init_attention_backend()
         self.init_cuda_graphs()
 
     def init_torch_distributed(self):
@@ -350,8 +345,8 @@ class ModelRunner:
     def init_memory_pool(
         self,
         total_gpu_memory: int,
-        max_num_reqs: int = None,
-        max_total_tokens: int = None,
+        max_num_reqs: Optional[int] = None,
+        max_total_tokens: Optional[int] = None,
     ):
         if self.server_args.kv_cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
@@ -385,7 +380,7 @@ class ModelRunner:
                     ),
                     2048,
                 ),
-                5120,
+                4096,
             )
 
         self.req_to_token_pool = ReqToTokenPool(
@@ -403,9 +398,6 @@ class ModelRunner:
                 qk_rope_head_dim=self.model_config.qk_rope_head_dim,
                 layer_num=self.model_config.num_hidden_layers,
             )
-            logger.info("using MLA Triton implementaion, flashinfer is disabled")
-            # FIXME: temporarily only Triton MLA is supported
-            self.server_args.disable_flashinfer = True
         else:
             self.token_to_kv_pool = MHATokenToKVPool(
                 self.max_total_num_tokens,
@@ -428,103 +420,36 @@ class ModelRunner:
         c = a @ b
         return c
 
-    def init_flashinfer(self):
-        """Init flashinfer attention kernel wrappers."""
-        if self.server_args.disable_flashinfer:
-            assert (
-                self.sliding_window_size is None
-            ), "turn on flashinfer to support window attention"
-            self.flashinfer_prefill_wrapper_ragged = None
-            self.flashinfer_prefill_wrapper_paged = None
-            self.flashinfer_decode_wrapper = None
-            return
-
-        if not _grouped_size_compiled_for_decode_kernels(
-            self.model_config.num_attention_heads // self.tp_size,
-            self.model_config.get_num_kv_heads(self.tp_size),
-        ):
-            use_tensor_cores = True
+    def init_attention_backend(self):
+        """Init attention kernel backend."""
+        if self.server_args.attention_backend == "flashinfer":
+            self.attn_backend = FlashInferAttnBackend(self)
+        elif self.server_args.attention_backend == "triton":
+            assert self.sliding_window_size is None, (
+                "Window attention is not supported in the triton attention backend. "
+                "Please use `--attention-backend flashinfer`."
+            )
+            self.attn_backend = TritonAttnBackend(self)
         else:
-            use_tensor_cores = False
-
-        if self.sliding_window_size is None:
-            self.flashinfer_workspace_buffer = torch.empty(
-                global_config.flashinfer_workspace_size,
-                dtype=torch.uint8,
-                device="cuda",
+            raise ValueError(
+                f"Invalid attention backend: {self.server_args.attention_backend}"
             )
-            self.flashinfer_prefill_wrapper_ragged = (
-                BatchPrefillWithRaggedKVCacheWrapper(
-                    self.flashinfer_workspace_buffer, "NHD"
-                )
-            )
-            self.flashinfer_prefill_wrapper_paged = BatchPrefillWithPagedKVCacheWrapper(
-                self.flashinfer_workspace_buffer, "NHD"
-            )
-            self.flashinfer_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                self.flashinfer_workspace_buffer,
-                "NHD",
-                use_tensor_cores=use_tensor_cores,
-            )
-        else:
-            self.flashinfer_workspace_buffer = torch.empty(
-                global_config.flashinfer_workspace_size,
-                dtype=torch.uint8,
-                device="cuda",
-            )
-            self.flashinfer_prefill_wrapper_ragged = None
-            self.flashinfer_prefill_wrapper_paged = []
-            self.flashinfer_decode_wrapper = []
-            for i in range(2):
-                self.flashinfer_prefill_wrapper_paged.append(
-                    BatchPrefillWithPagedKVCacheWrapper(
-                        self.flashinfer_workspace_buffer, "NHD"
-                    )
-                )
-                self.flashinfer_decode_wrapper.append(
-                    BatchDecodeWithPagedKVCacheWrapper(
-                        self.flashinfer_workspace_buffer,
-                        "NHD",
-                        use_tensor_cores=use_tensor_cores,
-                    )
-                )
 
     def init_cuda_graphs(self):
         """Capture cuda graphs."""
+        from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
+
+        self.cuda_graph_runner = None
+
         if not self.is_generation:
             # TODO: Currently, cuda graph only captures decode steps, which only exists for generation models
             return
 
-        from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
-
-        if self.server_args.disable_cuda_graph or (self.server_args.disable_flashinfer and 'NVIDIA' in card_name):
-            self.cuda_graph_runner = None
+        if self.server_args.disable_cuda_graph:
             return
 
         logger.info("Capture cuda graph begin. This can take up to several minutes.")
-
-        if self.server_args.disable_cuda_graph_padding:
-            batch_size_list = list(range(1, 32)) + [64, 128]
-        else:
-            batch_size_list = [1, 2, 4] + [i * 8 for i in range(1, 21)]
-
-        self.cuda_graph_runner = CudaGraphRunner(
-            self,
-            max_batch_size_to_capture=max(batch_size_list),
-            use_torch_compile=self.server_args.enable_torch_compile,
-            disable_padding=self.server_args.disable_cuda_graph_padding,
-        )
-        try:
-            self.cuda_graph_runner.capture(batch_size_list)
-        except RuntimeError as e:
-            raise Exception(
-                f"Capture cuda graph failed: {e}\n"
-                "Possible solutions:\n"
-                "1. disable cuda graph by --disable-cuda-graph\n"
-                "2. set --mem-fraction-static to a smaller value\n"
-                "3. disable torch compile by not using --enable-torch-compile\n"
-                "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
-            )
+        self.cuda_graph_runner = CudaGraphRunner(self)
 
     @torch.inference_mode()
     def forward_decode(self, batch: ScheduleBatch):
