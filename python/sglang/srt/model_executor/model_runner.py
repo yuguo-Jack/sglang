@@ -107,7 +107,7 @@ class ModelRunner:
         # Init componnets
         min_per_gpu_memory = self.init_torch_distributed()
         # Monkey patch model loader
-        setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
+        setattr(ModelRegistry, "load_model_cls", load_model_cls_srt)
         self.load_model()
         self.init_memory_pool(
             min_per_gpu_memory,
