@@ -82,6 +82,7 @@ def set_torch_compile_config():
 
     torch._inductor.config.coordinate_descent_tuning = True
     torch._inductor.config.triton.unique_kernel_names = True
+    card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
     if 'NVIDIA' in card_name:
         torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
     
