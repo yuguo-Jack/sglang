@@ -17,7 +17,8 @@ limitations under the License.
 # Modify details for the adaptation of Qwen2 model.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, Optional, Tuple
-
+import os
+import re
 import torch
 from torch import nn
 from vllm.config import CacheConfig
@@ -34,7 +35,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
+from vllm.model_executor.utils import pad_weight, gemm_bank_conf
+from vllm import _custom_ops as ops
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
@@ -145,6 +147,11 @@ class Qwen2Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
         )
+        self.quant_method = None
+        if quant_config is not None:
+            self.quant_method=quant_config.get_name()
+
+        self.use_fa_pad = os.environ.get('FA_PAD', False)
 
     def forward(
         self,
@@ -153,6 +160,8 @@ class Qwen2Attention(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if self.use_fa_pad and self.quant_method is None:
+            qkv = qkv[...,:-32]
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, input_metadata)
@@ -280,6 +289,13 @@ class Qwen2ForCausalLM(nn.Module):
         self.sampler = Sampler()
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
+        self.quant_method = None
+        if quant_config is not None:
+            self.quant_method=quant_config.get_name()
+
+        self.use_gemm_nn = os.environ.get('LLAMA_NN', True)
+        self.use_fa_pad = os.environ.get('FA_PAD', False)
+
     @torch.no_grad()
     def forward(
         self,
@@ -342,6 +358,79 @@ class Qwen2ForCausalLM(nn.Module):
                     and name == "model.embed_tokens.weight"
                 ):
                     weight_loader(params_dict["lm_head.weight"], loaded_weight)
+        if self.use_gemm_nn and self.quant_method is None:
+            lay_key_words = [
+                "self_attn.qkv_proj.weight",
+                "self_attn.o_proj.weight",
+                "mlp.gate_up_proj.weight",
+                "mlp.down_proj.weight",
+            ]
+            combined_words = "|".join(lay_key_words)
+            
+            lay_qkv_words = ["self_attn.qkv_proj.weight"]   
+            qkv_words = "|".join(lay_qkv_words)  
+            
+            lay_qkv_bias_words = ["self_attn.qkv_proj.bias"]   
+            qkv_bias_words = "|".join(lay_qkv_bias_words) 
+            
+            for layername, weight in params_dict.items():
+                if self.use_fa_pad and (re.findall(qkv_bias_words, layername)):
+                    weight.data = pad_weight(weight.data, 32)
+                    
+                matches = re.findall(combined_words, layername)
+                if matches:       
+                    if self.use_fa_pad and (re.findall(qkv_words, layername)):
+                        if not gemm_bank_conf(weight.data.shape[0]):
+                            weight.data = pad_weight(weight.data, 32)
+                        
+                    _weight = torch.zeros_like(weight.data)
+                    ori_shape =_weight.shape
+                    
+                    ops.trans_w16_gemm(_weight, weight.data, _weight.shape[0], _weight.shape[1])
+                    weight.data.copy_(_weight)
+                    
+                    weight.data=weight.data.reshape(ori_shape[1],-1)
+                    
+        if self.quant_method == "awq":
+            lay_key_words = [
+                "self_attn.qkv_proj.qweight",
+                "self_attn.o_proj.qweight",
+                "mlp.gate_up_proj.qweight",
+                "mlp.down_proj.qweight"
+            ]
+            combined_words = "|".join(lay_key_words)
+            
+            for layername, weight in params_dict.items():
+                
+                matches = re.findall(combined_words, layername)
+                if matches:
+                    qweight =params_dict[layername]
+                    qzeros=params_dict[layername.replace("qweight", "qzeros")]
+                    scales=params_dict[layername.replace("qweight", "scales")]
+                    zeros_and_scalse =params_dict[layername.replace("qweight", "zeros_and_scales")]
+                    
+                    group_size= self.quant_config.group_size 
+                   
+                    dim_n = scales.data.shape[1]
+                    dim_k = qweight.data.shape[0]
+                    pad_group=2              
+                    
+                    _qw, _sz=ops.convert_s4(qweight,qzeros,scales,int(group_size)) 
+                    
+                    sz = ops.sz_permute(_sz).reshape(-1,dim_n)       
+                    
+                    zeros_and_scalse.data.copy_(sz)
+                    qweight.data.copy_(_qw)
+                    
+                    #reshape
+                    zeros_and_scalse.data=zeros_and_scalse.reshape(dim_n,-1)    #[k/greop_size,n]------>[n,k/group_size]
+                    qweight.data=qweight.data.reshape(dim_n,-1)                      #[k,n/8]---->[n,k/8]  
+                
+                    if dim_k % 4096==0:
+                        zeros_and_scalse_pad= torch.zeros(dim_n,pad_group,dtype=torch.int32).cuda()
+                        zeros_and_scalse.data=torch.cat((zeros_and_scalse.data,zeros_and_scalse_pad),dim=1).contiguous()
+                        qweight_pad= torch.zeros(dim_n,int(group_size//4),dtype=torch.int32).cuda()
+                        qweight.data=torch.cat((qweight.data,qweight_pad),dim=1).contiguous()    
 
 
 EntryClass = Qwen2ForCausalLM
