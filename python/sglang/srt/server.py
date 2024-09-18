@@ -78,6 +78,7 @@ from sglang.srt.utils import (
     assert_pkg_version,
     configure_logger,
     enable_show_time_cost,
+    is_hip,
     kill_child_process,
     maybe_set_triton_cache_manager,
     prepare_model,
@@ -152,7 +153,7 @@ async def flush_cache():
 async def update_weights(obj: UpdateWeightReqInput, request: Request):
 
     success, message = await tokenizer_manager.update_weights(obj, request)
-    content = {"message": message, "success": str(success)}
+    content = {"success": success, "message": message}
     if success:
         return JSONResponse(
             content,
@@ -437,6 +438,10 @@ def _set_envs_and_config(server_args: ServerArgs):
             "at https://docs.flashinfer.ai/installation.html.",
         )
 
+    if is_hip():
+        # to figure out a better method of not using fork later
+        mp.set_start_method("spawn", force=True)
+
 
 def _wait_and_warmup(server_args, pipe_finish_writer, pid):
     headers = {}
@@ -614,6 +619,7 @@ class Runtime:
         return_logprob: Optional[Union[List[bool], bool]] = False,
         logprob_start_len: Optional[Union[List[int], int]] = None,
         top_logprobs_num: Optional[Union[List[int], int]] = None,
+        lora_path: Optional[List[Optional[str]]] = None,
     ):
         json_data = {
             "text": prompt,
@@ -621,7 +627,9 @@ class Runtime:
             "return_logprob": return_logprob,
             "logprob_start_len": logprob_start_len,
             "top_logprobs_num": top_logprobs_num,
+            "lora_path": lora_path,
         }
+        assert not isinstance(lora_path, list) or len(lora_path) == len(prompt)
         response = requests.post(
             self.url + "/generate",
             json=json_data,

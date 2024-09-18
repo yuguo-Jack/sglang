@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
     from sglang.srt.mem_cache.memory_pool import BaseTokenToKVPool, ReqToTokenPool
     from sglang.srt.model_executor.model_runner import ModelRunner
-    from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 
 
 class ForwardMode(IntEnum):
@@ -59,7 +58,6 @@ class InputMetadata:
     """Store all inforamtion of a forward pass."""
 
     forward_mode: ForwardMode
-    sampling_info: SamplingBatchInfo
     batch_size: int
     req_pool_indices: torch.Tensor
     seq_lens: torch.Tensor
@@ -83,7 +81,7 @@ class InputMetadata:
     return_logprob: bool = False
     top_logprobs_nums: List[int] = None
     extend_seq_lens_cpu: List[int] = None
-    logprob_start_lens_cpu: List[int] = None
+    extend_logprob_start_lens_cpu: List[int] = None
 
     # For multimodal
     pixel_values: List[torch.Tensor] = None
@@ -140,27 +138,13 @@ class InputMetadata:
         self.positions = self.positions.to(torch.int64)
 
     def compute_extend_infos(self, batch: ScheduleBatch):
-        extend_lens_cpu = [
-            len(r.fill_ids) - batch.prefix_lens_cpu[i] for i, r in enumerate(batch.reqs)
-        ]
-        self.extend_seq_lens = torch.tensor(extend_lens_cpu, device="cuda")
+        self.extend_seq_lens = torch.tensor(batch.extend_lens_cpu, device="cuda")
         self.extend_prefix_lens = torch.tensor(batch.prefix_lens_cpu, device="cuda")
-        self.extend_start_loc = torch.zeros_like(self.seq_lens)
+        self.extend_start_loc = torch.zeros_like(self.extend_seq_lens)
         self.extend_start_loc[1:] = torch.cumsum(self.extend_seq_lens[:-1], dim=0)
-        self.extend_no_prefix = all(l == 0 for l in batch.prefix_lens_cpu)
-
-        self.extend_seq_lens_cpu = extend_lens_cpu
-        self.logprob_start_lens_cpu = [
-            (
-                min(
-                    req.logprob_start_len - batch.prefix_lens_cpu[i],
-                    extend_lens_cpu[i] - 1,
-                )
-                if req.logprob_start_len >= batch.prefix_lens_cpu[i]
-                else extend_lens_cpu[i] - 1  # Fake extend, actually decode
-            )
-            for i, req in enumerate(batch.reqs)
-        ]
+        self.extend_no_prefix = all(x == 0 for x in batch.prefix_lens_cpu)
+        self.extend_seq_lens_cpu = batch.extend_lens_cpu
+        self.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens_cpu
 
     @classmethod
     def from_schedule_batch(
@@ -170,7 +154,6 @@ class InputMetadata:
     ):
         ret = cls(
             forward_mode=batch.forward_mode,
-            sampling_info=batch.sampling_info,
             batch_size=batch.batch_size(),
             req_pool_indices=batch.req_pool_indices,
             seq_lens=batch.seq_lens,
@@ -182,8 +165,6 @@ class InputMetadata:
             top_logprobs_nums=batch.top_logprobs_nums,
         )
 
-        ret.sampling_info.update_penalties()
-        ret.sampling_info.update_regex_vocab_mask(batch)
         ret.compute_positions(batch)
 
         if not batch.forward_mode.is_decode():

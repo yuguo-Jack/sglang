@@ -42,7 +42,6 @@ from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.sampler import Sampler
 from sglang.srt.model_executor.forward_batch_info import InputMetadata
 
 Qwen2Config = None
@@ -151,7 +150,7 @@ class Qwen2Attention(nn.Module):
         if quant_config is not None:
             self.quant_method=quant_config.get_name()
 
-        self.use_fa_pad = os.environ.get('FA_PAD', False)
+        self.use_fa_pad = os.environ.get('FA_PAD') == '1'
 
     def forward(
         self,
@@ -286,15 +285,15 @@ class Qwen2ForCausalLM(nn.Module):
         self.model = Qwen2Model(config, quant_config=quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config)
-        self.sampler = Sampler()
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
         self.quant_method = None
         if quant_config is not None:
             self.quant_method=quant_config.get_name()
 
-        self.use_gemm_nn = os.environ.get('LLAMA_NN', True)
-        self.use_fa_pad = os.environ.get('FA_PAD', False)
+        self.use_gemm_nn = True
+        self.use_gemm_pad = os.environ.get('GEMM_PAD') == '1'
+        self.use_fa_pad = os.environ.get('FA_PAD') == '1'
 
     @torch.no_grad()
     def forward(
@@ -307,11 +306,9 @@ class Qwen2ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, input_metadata, input_embeds)
         if not get_embedding:
-            logits_output = self.logits_processor(
+            return self.logits_processor(
                 input_ids, hidden_states, self.lm_head.weight, input_metadata
             )
-            sample_output = self.sampler(logits_output, input_metadata.sampling_info)
-            return sample_output, logits_output
         else:
             return self.pooler(hidden_states, input_metadata)
 
@@ -378,7 +375,10 @@ class Qwen2ForCausalLM(nn.Module):
                     weight.data = pad_weight(weight.data, 32)
                     
                 matches = re.findall(combined_words, layername)
-                if matches:       
+                if matches:    
+                    if self.use_gemm_pad and gemm_bank_conf(weight.data.shape[0]):
+                        weight.data = pad_weight(weight.data, 32)  
+                           
                     if self.use_fa_pad and (re.findall(qkv_words, layername)):
                         if not gemm_bank_conf(weight.data.shape[0]):
                             weight.data = pad_weight(weight.data, 32)

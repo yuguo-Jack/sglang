@@ -30,10 +30,8 @@ from sglang.srt.layers.logits_processor import (
     LogitsProcessor,
     LogitsProcessorOutput,
 )
-from sglang.srt.layers.sampler import SampleOutput
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, InputMetadata
-from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import monkey_patch_vllm_all_gather
 
 if TYPE_CHECKING:
@@ -43,6 +41,9 @@ if TYPE_CHECKING:
 def _to_torch(model: torch.nn.Module, reverse: bool = False):
     for sub in model._modules.values():
         if isinstance(sub, CustomOp):
+            # NOTE: FusedMoE torch native implementaiton is not efficient
+            if "FusedMoE" in sub.__class__.__name__:
+                continue
             if reverse:
                 sub._forward_method = sub.forward_cuda
                 setattr(sub, "is_torch_compile", False)
@@ -112,7 +113,15 @@ class CudaGraphRunner:
             self.capture_bs = list(range(1, 32)) + [64, 128]
         else:
             self.capture_bs = [1, 2, 4] + [i * 8 for i in range(1, 21)]
-        self.compile_bs = [1, 2, 4, 8, 16, 24, 32] if self.use_torch_compile else []
+        self.compile_bs = (
+            [
+                bs
+                for bs in self.capture_bs
+                if bs <= self.model_runner.server_args.max_torch_compile_bs
+            ]
+            if self.use_torch_compile
+            else []
+        )
 
         # Common inputs
         self.max_bs = max(self.capture_bs)
@@ -133,10 +142,6 @@ class CudaGraphRunner:
         self.seq_len_fill_value = (
             self.model_runner.attn_backend.get_cuda_graph_seq_len_fill_value()
         )
-
-        # Sampling info
-        vocab_size = model_runner.model_config.vocab_size
-        self.sampling_info = SamplingBatchInfo.dummy_one(self.max_bs, vocab_size)
 
         if self.use_torch_compile:
             set_torch_compile_config()
@@ -196,7 +201,6 @@ class CudaGraphRunner:
         def run_once():
             input_metadata = InputMetadata(
                 forward_mode=ForwardMode.DECODE,
-                sampling_info=self.sampling_info[:bs],
                 batch_size=bs,
                 req_pool_indices=req_pool_indices,
                 seq_lens=seq_lens,
@@ -205,7 +209,7 @@ class CudaGraphRunner:
                 attn_backend=self.model_runner.attn_backend,
                 out_cache_loc=out_cache_loc,
                 return_logprob=False,
-                top_logprobs_nums=0,
+                top_logprobs_nums=[0] * bs,
                 positions=(seq_lens - 1 + position_ids_offsets).to(torch.int64),
             )
             return forward(input_ids, input_metadata.positions, input_metadata)
@@ -255,14 +259,9 @@ class CudaGraphRunner:
             bs, self.req_pool_indices, self.seq_lens
         )
 
-        # Sampling inputs
-        self.sampling_info.inplace_assign(raw_bs, batch.sampling_info)
-
         # Replay
-        torch.cuda.synchronize()
         self.graphs[bs].replay()
-        torch.cuda.synchronize()
-        sample_output, logits_output = self.output_buffers[bs]
+        logits_output = self.output_buffers[bs]
 
         # Unpad
         if bs != raw_bs:
@@ -273,11 +272,6 @@ class CudaGraphRunner:
                 input_token_logprobs=None,
                 input_top_logprobs=None,
                 output_top_logprobs=None,
-            )
-            sample_output = SampleOutput(
-                sample_output.success[:raw_bs],
-                sample_output.probs[:raw_bs],
-                sample_output.batch_next_token_ids[:raw_bs],
             )
 
         # Extract logprobs
@@ -295,4 +289,4 @@ class CudaGraphRunner:
                     logits_output.next_token_logprobs, logits_metadata
                 )[1]
 
-        return sample_output, logits_output
+        return logits_output
