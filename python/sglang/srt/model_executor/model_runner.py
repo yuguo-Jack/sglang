@@ -348,13 +348,28 @@ class ModelRunner:
                 * torch._utils._element_size(self.kv_cache_dtype)
             )
         else:
-            cell_size = (
-                self.model_config.get_num_kv_heads(self.tp_size)
-                * self.model_config.head_dim
-                * self.model_config.num_hidden_layers
-                * 2
-                * torch._utils._element_size(self.kv_cache_dtype)
-            )
+            if self.server_args.kv_cache_dtype == "int8":
+                cell_size = (
+                    self.model_config.get_num_kv_heads(self.tp_size)
+                    * self.model_config.head_dim
+                    * self.model_config.num_hidden_layers
+                    * 2
+                    * torch._utils._element_size(self.kv_cache_dtype)
+                    + 
+                    self.model_config.get_num_kv_heads(self.tp_size)
+                    * 1
+                    * self.model_config.num_hidden_layers
+                    * 2
+                    * torch._utils._element_size(torch.float16)
+                ) # scales
+            else:
+                cell_size = (
+                    self.model_config.get_num_kv_heads(self.tp_size)
+                    * self.model_config.head_dim
+                    * self.model_config.num_hidden_layers
+                    * 2
+                    * torch._utils._element_size(self.kv_cache_dtype)
+                )
         rest_memory = available_gpu_memory - total_gpu_memory * (
             1 - self.mem_fraction_static
         )
