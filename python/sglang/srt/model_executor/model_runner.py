@@ -371,6 +371,8 @@ class ModelRunner:
             self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
             self.kv_cache_dtype = torch.float8_e5m2
+        elif self.server_args.kv_cache_dtype == "int8":
+            self.kv_cache_dtype = torch.int8
         else:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
