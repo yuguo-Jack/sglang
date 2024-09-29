@@ -362,6 +362,20 @@ class ModelRunner:
                     * 2
                     * torch._utils._element_size(torch.float16)
                 ) # scales
+            elif self.server_args.kv_cache_dtype == "int4":
+                cell_size = (
+                    self.model_config.get_num_kv_heads(self.tp_size)
+                    * self.model_config.head_dim
+                    * self.model_config.num_hidden_layers
+                    * 2
+                    * torch._utils._element_size(self.kv_cache_dtype) // 2
+                    + 
+                    self.model_config.get_num_kv_heads(self.tp_size)
+                    * (self.model_config.head_dim // self.server_args.kvint4_groupsize)
+                    * self.model_config.num_hidden_layers
+                    * 2
+                    * torch._utils._element_size(torch.float16)
+                ) # scales
             else:
                 cell_size = (
                     self.model_config.get_num_kv_heads(self.tp_size)
@@ -387,6 +401,8 @@ class ModelRunner:
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
             self.kv_cache_dtype = torch.float8_e5m2
         elif self.server_args.kv_cache_dtype == "int8":
+            self.kv_cache_dtype = torch.int8
+        elif self.server_args.kv_cache_dtype == "int4":
             self.kv_cache_dtype = torch.int8
         else:
             raise ValueError(
@@ -441,6 +457,8 @@ class ModelRunner:
                 head_num=self.model_config.get_num_kv_heads(self.tp_size),
                 head_dim=self.model_config.head_dim,
                 layer_num=self.model_config.num_hidden_layers,
+                kv_cache_dtype_str=self.server_args.kv_cache_dtype,
+                kvint4_groupsize=self.server_args.kvint4_groupsize,
             )
         logger.info(
             f"Memory pool end. "

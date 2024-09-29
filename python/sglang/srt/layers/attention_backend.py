@@ -324,10 +324,13 @@ class FlashInferAttnBackend(AttentionBackend):
 
 class TritonAttnBackend(AttentionBackend):
     def __init__(self, model_runner: ModelRunner):
+        self.kv_int8 = False
+        self.kv_int4 = False
         if model_runner.server_args.kv_cache_dtype == "int8":
             self.kv_int8 = True
-        else:
-            self.kv_int8 = False
+        if model_runner.server_args.kv_cache_dtype == "int4":
+            self.kv_int4 = True
+            self.quant_group_size = model_runner.server_args.kvint4_groupsize
         # Lazy import to avoid the initialization of cuda context
         from sglang.srt.layers.triton_attention.decode_attention import (
             decode_attention_fwd,
@@ -347,6 +350,15 @@ class TritonAttnBackend(AttentionBackend):
             )
             self.decode_attention_fwd = decode_attention_fwd_int8kv
             self.extend_attention_fwd = extend_attention_fwd_int8kv
+        elif self.kv_int4:
+            from sglang.srt.layers.triton_attention.decode_attention_int4kv import (
+                decode_attention_fwd_int4kv,
+            )
+            from sglang.srt.layers.triton_attention.extend_attention_int4kv import (
+                extend_attention_fwd_int4kv,
+            )
+            self.decode_attention_fwd = decode_attention_fwd_int4kv
+            self.extend_attention_fwd = extend_attention_fwd_int4kv
         else:
             self.decode_attention_fwd = decode_attention_fwd
             self.extend_attention_fwd = extend_attention_fwd
@@ -454,6 +466,26 @@ class TritonAttnBackend(AttentionBackend):
                 layer.scaling,
                 layer.logit_cap,
             )
+        elif self.kv_int4:
+            self.extend_attention_fwd(
+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                k.contiguous(),
+                v.contiguous(),
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                input_metadata.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                input_metadata.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                input_metadata.token_to_kv_pool.get_key_scales_buffer(layer.layer_id),
+                input_metadata.token_to_kv_pool.get_value_scales_buffer(layer.layer_id),
+                input_metadata.req_to_token_pool.req_to_token,
+                input_metadata.req_pool_indices,
+                input_metadata.seq_lens,
+                input_metadata.extend_seq_lens,
+                input_metadata.extend_start_loc,
+                max_extend_len,
+                self.quant_group_size,
+                layer.scaling,               
+                layer.logit_cap,
+            )
         else:
             self.extend_attention_fwd(
                 q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
@@ -505,6 +537,24 @@ class TritonAttnBackend(AttentionBackend):
                 attn_logits,
                 max_seq_len,
                 layer.scaling,
+                layer.logit_cap,
+            )
+        elif self.kv_int4:
+            self.decode_attention_fwd(
+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                input_metadata.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                input_metadata.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                input_metadata.token_to_kv_pool.get_key_scales_buffer(layer.layer_id),
+                input_metadata.token_to_kv_pool.get_value_scales_buffer(layer.layer_id),
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                input_metadata.req_to_token_pool.req_to_token,
+                input_metadata.req_pool_indices,
+                start_loc,
+                input_metadata.seq_lens,
+                attn_logits,
+                max_seq_len,
+                layer.scaling,
+                self.quant_group_size,                
                 layer.logit_cap,
             )
         else:
