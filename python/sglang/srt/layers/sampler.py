@@ -7,8 +7,6 @@ from flashinfer.sampling import (
     top_k_renorm_prob,
     top_k_top_p_sampling_from_probs,
     top_p_renorm_prob,
-)
-from vllm.model_executor.custom_op import CustomOp
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 # TODO: move this dict to another place
@@ -40,7 +38,10 @@ class Sampler(nn.Module):
                 torch.isnan(probs), torch.full_like(probs, 1e-10), probs
             )
 
-        if global_server_args_dict["sampling_backend"] == "flashinfer":
+        if sampling_info.top_ks.max().item() <= 1:
+            # Use torch.argmax if all requests use greedy sampling
+            batch_next_token_ids = torch.argmax(probs, -1)
+        elif global_server_args_dict["sampling_backend"] == "flashinfer":
             max_top_k_round, batch_size = 32, probs.shape[0]
             uniform_samples = torch.rand(
                 (max_top_k_round, batch_size), device=probs.device

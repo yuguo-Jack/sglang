@@ -46,7 +46,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.torchao_utils import apply_torchao_config_
 from sglang.srt.managers.schedule_batch import global_server_args_dict
-from sglang.srt.model_executor.forward_batch_info import InputMetadata
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 
 class LlamaMLP(nn.Module):
@@ -171,14 +171,14 @@ class LlamaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         if self.use_fa_pad and self.quant_method is None:
             qkv = qkv[...,:-32]
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, input_metadata)
+        attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -232,7 +232,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -244,7 +244,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            input_metadata=input_metadata,
+            forward_batch=forward_batch,
         )
 
         # Fully Connected
@@ -281,7 +281,7 @@ class LlamaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if input_embeds is None:
@@ -294,7 +294,7 @@ class LlamaModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                input_metadata,
+                forward_batch,
                 residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -331,15 +331,16 @@ class LlamaForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> LogitsProcessorOutput:
-        hidden_states = self.model(input_ids, positions, input_metadata, input_embeds)
+        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
         return self.logits_processor(
-            input_ids, hidden_states, self.lm_head.weight, input_metadata
+            input_ids, hidden_states, self.lm_head.weight, forward_batch
         )
 
     def get_hidden_dim(self, module_name):
+        # return input_dim, output_dim
         if module_name in ["q_proj", "o_proj", "qkv_proj"]:
             return self.config.hidden_size, self.config.hidden_size
         elif module_name in ["kv_proj"]:
@@ -420,15 +421,21 @@ class LlamaForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Skip loading kv_scale from ckpts towards new design.
+                if name.endswith(".kv_scale") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
-                if self.torchao_config:
-                    if name.endswith("proj.weight") and param.ndim == 2:
-                        params_dict[name] = torchao_quantize_param_data(
-                            param, self.torchao_config
-                        )
+        if (
+            hasattr(self.config, "tie_word_embeddings")
+            and self.config.tie_word_embeddings
+        ):
+            # Tie output embedding layer to input embedding layer, to solve issues where lm_head.weight is missing
+            param = self.lm_head.weight
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, self.model.embed_tokens.weight)
 
         if self.use_gemm_nn and self.quant_method is None :
             lay_key_words = [
