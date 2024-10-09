@@ -19,9 +19,6 @@ limitations under the License.
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
-card_name = torch.cuda.get_device_properties(torch.cuda.current_device()).name
-if 'NVIDIA' in card_name:
-    from flashinfer import bmm_fp8
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig

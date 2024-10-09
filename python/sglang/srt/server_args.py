@@ -154,7 +154,7 @@ class ServerArgs:
 
         if not is_flashinfer_available():
             self.attention_backend = "triton"
-            self.sampling_backend = "pytorch"
+            self.sampling_backend = "flashinfer"
 
         # Default kernel backends
         if self.attention_backend is None:

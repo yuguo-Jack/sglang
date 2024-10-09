@@ -23,13 +23,12 @@ import torch.nn as nn
 
 from sglang.srt.utils import is_flashinfer_available
 
-if is_flashinfer_available():
-    from flashinfer.norm import (
-        fused_add_rmsnorm,
-        gemma_fused_add_rmsnorm,
-        gemma_rmsnorm,
-        rmsnorm,
-    )
+from flashinfer.norm import (
+    fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm,
+    gemma_rmsnorm,
+    rmsnorm,
+)
 
 from vllm.model_executor.custom_op import CustomOp
 
@@ -119,8 +118,8 @@ class GemmaRMSNorm(CustomOp):
         return out
 
 
-if not is_flashinfer_available():
-    logger.info(
-        "FlashInfer is not available on Non-NV platforms. Fallback to other kernel libraries."
-    )
-    from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
+# if not is_flashinfer_available():
+#     logger.info(
+#         "FlashInfer is not available on Non-NV platforms. Fallback to other kernel libraries."
+#     )
+#     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm

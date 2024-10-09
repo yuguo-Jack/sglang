@@ -22,8 +22,7 @@ import torch.nn.functional as F
 
 from sglang.srt.utils import is_flashinfer_available
 
-if is_flashinfer_available():
-    from flashinfer.activation import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+from flashinfer.activation import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
 
 from vllm.distributed import (
     divide,
@@ -146,8 +145,8 @@ def get_act_fn(
     return act_fn
 
 
-if not is_flashinfer_available():
-    logger.info(
-        "FlashInfer is not available on Non-NV platforms. Fallback to other kernel libraries."
-    )
-    from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
+# if not is_flashinfer_available():
+#     logger.info(
+#         "FlashInfer is not available on Non-NV platforms. Fallback to other kernel libraries."
+#     )
+#     from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
