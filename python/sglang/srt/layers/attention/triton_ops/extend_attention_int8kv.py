@@ -147,7 +147,7 @@ def _fwd_kernel_in8kv(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=mask_n[None, :], other=1.0
         )
-        k = k_int8.to(REDUCE_TRITON_TYPE) * k_scales  # Dequantize K
+        k = k_int8.to(tl.float16) * k_scales  # Dequantize K
 
         qk = tl.dot(q.to(k.dtype), k)
         if BLOCK_DPE > 0:
@@ -191,7 +191,7 @@ def _fwd_kernel_in8kv(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v = v_int8.to(REDUCE_TRITON_TYPE) * v_scales  # Dequantize V
+        v = v_int8.to(tl.float16) * v_scales  # Dequantize V
 
         p = p.to(v.dtype)
         acc = acc * re_scale[:, None] + tl.dot(p, v)

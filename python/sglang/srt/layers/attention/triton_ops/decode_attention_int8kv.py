@@ -69,6 +69,7 @@ def _fwd_kernel_stage1(
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
     start_n = tl.program_id(2)
+    reduce_dtype = Att_Out.dtype.element_ty
 
     cur_kv_head = cur_head // kv_group_num
 
@@ -88,7 +89,7 @@ def _fwd_kernel_stage1(
     block_mask = tl.where(block_stard_index < cur_batch_seq_len, 1, 0)
 
     for start_mark in range(0, block_mask, 1):
-        q = tl.load(Q + off_q + start_mark).to(REDUCE_TRITON_TYPE)
+        q = tl.load(Q + off_q + start_mark).to(reduce_dtype)
         offs_n_new = cur_batch_start_index + offs_n
         k_loc = tl.load(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new,
@@ -113,7 +114,7 @@ def _fwd_kernel_stage1(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=1.0
         )
-        k = k_int8.to(REDUCE_TRITON_TYPE) * k_scales  # Dequantize K
+        k = k_int8.to(reduce_dtype) * k_scales  # Dequantize K
         att_value = tl.sum(q[None, :] * k, 1)
         att_value *= sm_scale
 
@@ -200,7 +201,7 @@ def _fwd_kernel_stage2(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v = v_int8.to(REDUCE_TRITON_TYPE) * v_scales  # Dequantize V
+        v = v_int8.to(tl.float16) * v_scales  # Dequantize V
         acc = acc * old_scale + tl.sum(p[:, None] * v, 0)
         e_max = n_e_max
 
@@ -343,6 +344,7 @@ def _fwd_grouped_kernel_stage1(
     cur_batch = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
     start_n = tl.program_id(2)
+    reduce_dtype = Att_Out.dtype.element_ty
 
     cur_head = cur_kv_head * kv_group_num + tl.arange(0, BLOCK_H)
     mask_h = cur_head < (cur_kv_head + 1) * kv_group_num
@@ -372,7 +374,7 @@ def _fwd_grouped_kernel_stage1(
     for start_mark in range(0, block_mask, 1):
         q = tl.load(
             Q + offs_q + start_mark, mask=(mask_h[:, None]) & (offs_d[None, :] < Lk)
-        ).to(REDUCE_TRITON_TYPE)
+        ).to(reduce_dtype)
         offs_n_new = cur_batch_start_index + offs_n
         k_loc = tl.load(
             Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new,
@@ -397,11 +399,11 @@ def _fwd_grouped_kernel_stage1(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=offs_n_new[None, :] < cur_batch_end_index, other=1.0
         )
-        k = k_int8.to(REDUCE_TRITON_TYPE) * k_scales  # Dequantize K
+        k = k_int8.to(reduce_dtype) * k_scales  # Dequantize K
         qk = tl.dot(q, k)
         if BLOCK_DPE > 0:
             qpe = tl.load(Q + off_qpe + start_mark, mask=mask_h[:, None]).to(
-                REDUCE_TRITON_TYPE
+                reduce_dtype
             )
             offs_buf_kpe = (
                 k_loc[None, :] * stride_buf_kbs
@@ -412,7 +414,7 @@ def _fwd_grouped_kernel_stage1(
                 K_Buffer + offs_buf_kpe,
                 mask=offs_n_new[None, :] < cur_batch_end_index,
                 other=0.0,
-            ).to(REDUCE_TRITON_TYPE)
+            ).to(reduce_dtype)
             qk += tl.dot(qpe, kpe)
         qk *= sm_scale
 
@@ -512,7 +514,7 @@ def _fwd_grouped_kernel_stage2(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v = v_int8.to(REDUCE_TRITON_TYPE) * v_scales  # Dequantize V
+        v = v_int8.to(tl.float16) * v_scales  # Dequantize V
         p = p.to(v.dtype)
         acc = acc * old_scale[:, None] + tl.dot(p, v)
         e_max = n_e_max
