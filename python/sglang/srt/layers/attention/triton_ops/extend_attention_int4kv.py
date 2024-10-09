@@ -148,8 +148,8 @@ def _fwd_kernel_in4kv(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=mask_n[None, :], other=1.0
         )
-        k_tmp = k_int8.to(REDUCE_TRITON_TYPE).view(k_int8.shape[0] // quant_group_size, quant_group_size, k_int8.shape[1]) * k_scales.view(k_scales.shape[0], 1, k_scales.shape[1])  # Dequantize K
-        k = k_tmp.view(k_tmp.shape[0] * k_tmp.shape[1], k_tmp.shape[2])
+        k_tmp = k_int8.to(REDUCE_TRITON_TYPE).reshape(k_int8.shape[0] // quant_group_size, quant_group_size, k_int8.shape[1]) * k_scales.reshape(k_scales.shape[0], 1, k_scales.shape[1])  # Dequantize K
+        k = k_tmp.reshape(k_tmp.shape[0] * k_tmp.shape[1], k_tmp.shape[2])
 
         qk = tl.dot(q.to(k.dtype), k)
         qk *= sm_scale
@@ -188,8 +188,8 @@ def _fwd_kernel_in4kv(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v_tmp = v_int8.to(REDUCE_TRITON_TYPE).view(v_int8.shape[0], v_int8.shape[1] // quant_group_size, quant_group_size) * v_scales.view(v_scales.shape[0], v_scales.shape[1], 1)  # Dequantize V
-        v = v_tmp.view(v_tmp.shape[0], v_tmp.shape[1] * v_tmp.shape[2])
+        v_tmp = v_int8.to(REDUCE_TRITON_TYPE).reshape(v_int8.shape[0], v_int8.shape[1] // quant_group_size, quant_group_size) * v_scales.reshape(v_scales.shape[0], v_scales.shape[1], 1)  # Dequantize V
+        v = v_tmp.reshape(v_tmp.shape[0], v_tmp.shape[1] * v_tmp.shape[2])
 
         p = p.to(v.dtype)
         acc = acc * re_scale[:, None] + tl.dot(p, v)

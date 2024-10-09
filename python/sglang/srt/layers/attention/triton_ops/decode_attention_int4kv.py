@@ -123,8 +123,8 @@ def _fwd_kernel_stage1(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=1.0
         )
-        k_tmp = k_int8.to(REDUCE_TRITON_TYPE).view(k_int8.shape[0], k_int8.shape[1] // quant_group_size, quant_group_size) * k_scales.view(k_scales.shape[0], k_scales.shape[1], 1)  # Dequantize K
-        k = k_tmp.view(k_tmp.shape[0], k_tmp.shape[1] * k_tmp.shape[2])
+        k_tmp = k_int8.to(REDUCE_TRITON_TYPE).reshape(k_int8.shape[0], k_int8.shape[1] // quant_group_size, quant_group_size) * k_scales.reshape(k_scales.shape[0], k_scales.shape[1], 1)  # Dequantize K
+        k = k_tmp.reshape(k_tmp.shape[0], k_tmp.shape[1] * k_tmp.shape[2])
 
         att_value = tl.sum(q[None, :] * k, 1)
         att_value *= sm_scale
@@ -222,8 +222,8 @@ def _fwd_kernel_stage2(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v_tmp = v_int8.to(REDUCE_TRITON_TYPE).view(v_int8.shape[0], v_int8.shape[1] // quant_group_size, quant_group_size) * v_scales.view(v_scales.shape[0], v_scales.shape[1], 1)  # Dequantize V
-        v = v_tmp.view(v_tmp.shape[0], v_tmp.shape[1] * v_tmp.shape[2])
+        v_tmp = v_int8.to(REDUCE_TRITON_TYPE).reshape(v_int8.shape[0], v_int8.shape[1] // quant_group_size, quant_group_size) * v_scales.reshape(v_scales.shape[0], v_scales.shape[1], 1)  # Dequantize V
+        v = v_tmp.reshape(v_tmp.shape[0], v_tmp.shape[1] * v_tmp.shape[2])
 
         acc = acc * old_scale + tl.sum(p[:, None] * v, 0)
         e_max = n_e_max
@@ -429,8 +429,8 @@ def _fwd_grouped_kernel_stage1(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=offs_n_new[None, :] < cur_batch_end_index, other=1.0
         )
-        k_tmp = k_int8.to(REDUCE_TRITON_TYPE).view(k_int8.shape[0] // quant_group_size, quant_group_size, k_int8.shape[1]) * k_scales.view(k_scales.shape[0], 1, k_scales.shape[1])  # Dequantize K
-        k = k_tmp.view(k_tmp.shape[0] * k_tmp.shape[1], k_tmp.shape[2])
+        k_tmp = k_int8.to(REDUCE_TRITON_TYPE).reshape(k_int8.shape[0] // quant_group_size, quant_group_size, k_int8.shape[1]) * k_scales.reshape(k_scales.shape[0], 1, k_scales.shape[1])  # Dequantize K
+        k = k_tmp.reshape(k_tmp.shape[0] * k_tmp.shape[1], k_tmp.shape[2])
 
         qk = tl.dot(q, k)
         qk *= sm_scale
@@ -541,8 +541,8 @@ def _fwd_grouped_kernel_stage2(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v_tmp = v_int8.to(REDUCE_TRITON_TYPE).view(v_int8.shape[0], v_int8.shape[1] // quant_group_size, quant_group_size) * v_scales.view(v_scales.shape[0], v_scales.shape[1], 1)  # Dequantize V
-        v = v_tmp.view(v_tmp.shape[0], v_tmp.shape[1] * v_tmp.shape[2])
+        v_tmp = v_int8.to(REDUCE_TRITON_TYPE).reshape(v_int8.shape[0], v_int8.shape[1] // quant_group_size, quant_group_size) * v_scales.reshape(v_scales.shape[0], v_scales.shape[1], 1)  # Dequantize V
+        v = v_tmp.reshape(v_tmp.shape[0], v_tmp.shape[1] * v_tmp.shape[2])
         
         p = p.to(v.dtype)
         acc = acc * old_scale[:, None] + tl.dot(p, v)
@@ -852,6 +852,109 @@ def destindex_copy_quantize_int4kv(K, DestLoc, Out, Out_scale, quant_group_dim):
         Out_scale.stride(0),
         Out_scale.stride(1),
         Out_scale.stride(2),
+        group_size,
+        BLOCK_GROUP_NUM=triton.next_power_of_2(group_size),
+        BLOCK_GROUP_DIM=group_dim,
+        num_warps=num_warps,
+        num_stages=1,
+    )
+    return
+
+@triton.jit
+def _bwd_kernel_destindex_dequantize_int4_kv(
+    Quantized,
+    Scale,
+    Dest_loc,
+    Out,
+    stride_q_bs,
+    stride_q_h,
+    stride_q_g,
+    stride_q_d,
+    stride_s_bs,
+    stride_s_h,
+    stride_s_g,
+    stride_o_bs,
+    stride_o_h,
+    stride_o_g,
+    stride_o_d,
+    group_size,
+    BLOCK_GROUP_NUM: tl.constexpr,
+    BLOCK_GROUP_DIM: tl.constexpr,
+):
+    cur_index = tl.program_id(0)
+    cur_head = tl.program_id(1)
+
+    offs_g = tl.arange(0, BLOCK_GROUP_NUM)
+    offs_d = tl.arange(0, BLOCK_GROUP_DIM // 2)
+
+    dest_index = tl.load(Dest_loc + cur_index)
+
+    # 加载量化数据
+    q_data = tl.load(
+        Quantized + cur_index * stride_q_bs + cur_head * stride_q_h + offs_g[:, None] * stride_q_g + offs_d[None, :],
+        mask=offs_g[:, None] < group_size,
+        other=0.0,
+    )
+
+    # 分离 int8 的低 4 位（int4 数据 0）和高 4 位（int4 数据 1）
+    low_4 = q_data & 0xF
+    high_4 = (q_data >> 4) & 0xF
+
+    # 恢复 int4 到 [-7, 7] 的范围
+    src_data_0 = low_4.to(tl.float16) - 8
+    src_data_1 = high_4.to(tl.float16) - 8
+
+    # 加载反量化比例因子（scale）
+    scale = tl.load(Scale + dest_index * stride_s_bs + cur_head * stride_s_h + offs_g, mask=offs_g < group_size)
+
+    # 反量化
+    dequant_data_0 = src_data_0 * scale[:, None]
+    dequant_data_1 = src_data_1 * scale[:, None]
+
+    # 存储反量化的 float 数据
+    o_ptrs_0 = Out + dest_index * stride_o_bs + cur_head * stride_o_h + offs_g[:, None] * stride_o_g + offs_d[None, :] * 2
+    o_ptrs_1 = Out + dest_index * stride_o_bs + cur_head * stride_o_h + offs_g[:, None] * stride_o_g + offs_d[None, :] * 2 + 1
+
+    tl.store(o_ptrs_0, dequant_data_0, mask=offs_g[:, None] < group_size)
+    tl.store(o_ptrs_1, dequant_data_1, mask=offs_g[:, None] < group_size)
+    return
+
+
+@torch.no_grad()
+def destindex_dequantize_int4kv(Quantized, Scale, DestLoc, Out, quant_group_dim):
+    bs = DestLoc.shape[0]
+    head_num = Quantized.shape[1]
+    head_dim = Out.shape[2]
+
+    assert head_dim % quant_group_dim == 0, "error head dim, can not been supported to copy dequant kv"
+    grid = (bs, head_num)
+    num_warps = 1
+
+    group_size = head_dim // quant_group_dim
+    group_dim = quant_group_dim
+
+    Quantized = Quantized.view((Quantized.shape[0], Quantized.shape[1], group_size, group_dim // 2))
+    Scale = Scale.view((Scale.shape[0], Scale.shape[1], group_size))
+    Out = Out.view(
+        Out.shape[0], Out.shape[1], group_size, group_dim
+    )  # Out 是 float16 类型，解压缩时需要两个 int4 恢复成 float16，所以 group_dim
+
+    _bwd_kernel_destindex_dequantize_int4_kv[grid](
+        Quantized,
+        Scale,
+        DestLoc,
+        Out,
+        Quantized.stride(0),
+        Quantized.stride(1),
+        Quantized.stride(2),
+        Quantized.stride(3),
+        Scale.stride(0),
+        Scale.stride(1),
+        Scale.stride(2),
+        Out.stride(0),
+        Out.stride(1),
+        Out.stride(2),
+        Out.stride(3),
         group_size,
         BLOCK_GROUP_NUM=triton.next_power_of_2(group_size),
         BLOCK_GROUP_DIM=group_dim,
