@@ -174,6 +174,12 @@ class TestExtendAttention(unittest.TestCase):
         b_start_loc = torch.arange(0, total_tokens, seq_len, device="cuda")
         b_seq_len = torch.full((B,), seq_len, device="cuda")
 
+        REDUCE_TORCH_TYPE = torch.float16
+        attn_logits = torch.empty(
+            (H_Q, total_tokens),
+            dtype=REDUCE_TORCH_TYPE,
+            device="cuda")
+
         decode_attention_fwd(
             q,
             k_buffer,
@@ -183,8 +189,8 @@ class TestExtendAttention(unittest.TestCase):
             b_req_idx,
             b_start_loc,
             b_seq_len,
+            attn_logits,
             seq_len,
-            total_tokens,
             sm_scale,
         )
 
