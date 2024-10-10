@@ -418,9 +418,9 @@ def _fwd_grouped_kernel_stage1(
         )
 
         # split int8 into two int4 values
-        k_int8_low = (k_int8_tmp & 0xF).to(tl.int8) - 8
-        k_int8_high = ((k_int8_tmp & 0xF0) >> 4).to(tl.int8) - 8
-        k_int8 = tl.interleave(k_int8_low, k_int8_high)
+        k_int8_low = tl.trans((k_int8_tmp & 0xF).to(tl.int8) - 8)
+        k_int8_high = tl.trans(((k_int8_tmp & 0xF0) >> 4).to(tl.int8) - 8)
+        k_int8 = tl.trans(tl.interleave(k_int8_low, k_int8_high))
 
         # Load K scales and dequantize
         offs_scales_k = (
