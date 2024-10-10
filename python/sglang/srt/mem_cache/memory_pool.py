@@ -176,15 +176,16 @@ class MHATokenToKVPool(BaseTokenToKVPool):
         if dtype == torch.int8:
             if kv_cache_dtype_str == "int4":
                 self.quant_group_size = kvint4_groupsize
+                assert head_dim % self.quant_group_size == 0, "error head dim, can not been supported to copy quant kv"
                 self.k_scales_buffer = [
                     torch.empty(
-                        (size + 1, head_num, 128 // self.quant_group_size), dtype=torch.float16, device="cuda"
+                        (size + 1, head_num, head_dim // self.quant_group_size), dtype=torch.float16, device="cuda"
                     )
                     for _ in range(layer_num)
                 ]
                 self.v_scales_buffer = [
                     torch.empty(
-                        (size + 1, head_num, 128 // self.quant_group_size), dtype=torch.float16, device="cuda"
+                        (size + 1, head_num, head_dim // self.quant_group_size), dtype=torch.float16, device="cuda"
                     )
                     for _ in range(layer_num)
                 ]
