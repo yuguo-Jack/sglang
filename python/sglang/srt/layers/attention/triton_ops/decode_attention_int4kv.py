@@ -573,15 +573,8 @@ def _decode_grouped_att_m_fwd(
     BLOCK = 32
     Lq, Lk = q.shape[-1], k_buffer.shape[-1]
 
-    if Lk == 576:
-        BLOCK_DMODEL = 512
-        BLOCK_DPE = 64
-    elif Lk == 288:
-        BLOCK_DMODEL = 256
-        BLOCK_DPE = 32
-    else:
-        BLOCK_DMODEL = triton.next_power_of_2(Lk)
-        BLOCK_DPE = 0
+    BLOCK_DMODEL = triton.next_power_of_2(Lk)
+    BLOCK_DPE = 0
 
     batch, head_num = B_req_idx.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[1]

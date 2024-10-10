@@ -284,15 +284,8 @@ def extend_attention_fwd_int4kv(
         v_extend.shape[-1],
     )
 
-    if Lq == 576:
-        BLOCK_DMODEL = 512
-        BLOCK_DPE = 64
-    elif Lq == 288:
-        BLOCK_DMODEL = 256
-        BLOCK_DPE = 32
-    else:
-        BLOCK_DMODEL = triton.next_power_of_2(Lq)
-        BLOCK_DPE = 0
+    BLOCK_DMODEL = triton.next_power_of_2(Lq)
+    BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     if CUDA_CAPABILITY[0] >= 9:

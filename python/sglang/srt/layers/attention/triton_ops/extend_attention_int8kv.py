@@ -105,15 +105,6 @@ def _fwd_kernel_in8kv(
         Q_Extend + offs_q, mask=(mask_m[:, None]) & (mask_d[None, :]), other=0.0
     )
 
-    if BLOCK_DPE > 0:
-        offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
-        offs_qpe = (
-            (cur_seq_extend_start_contiguous + cur_block_m * BLOCK_M + offs_m[:, None])
-            * stride_qbs
-            + cur_head * stride_qh
-            + offs_dpe[None, :]
-        )
-        qpe = tl.load(Q_Extend + offs_qpe, mask=mask_m[:, None], other=0.0)
 
     # stage 1: compute scores with prefix
     offs_n = tl.arange(0, BLOCK_N)
@@ -150,18 +141,7 @@ def _fwd_kernel_in8kv(
         k = k_int8.to(tl.float16) * k_scales  # Dequantize K
 
         qk = tl.dot(q.to(k.dtype), k)
-        if BLOCK_DPE > 0:
-            offs_kpe = (
-                offs_kv_loc[None, :] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_dpe[:, None]
-            )
-            kpe = tl.load(
-                K_Buffer + offs_kpe,
-                mask=mask_n[None, :],
-                other=0.0,
-            )
-            qk += tl.dot(qpe.to(kpe.dtype), kpe)
+        
         qk *= sm_scale
 
         if logit_cap > 0:
@@ -216,19 +196,6 @@ def _fwd_kernel_in8kv(
         )
 
         qk = tl.dot(q, k, out_dtype=tl.float32)
-        if BLOCK_DPE > 0:
-            offs_kpe = (
-                (cur_seq_extend_start_contiguous + start_n + offs_n[None, :])
-                * stride_kbs
-                + cur_kv_head * stride_kh
-                + offs_dpe[:, None]
-            )
-            kpe = tl.load(
-                K_Extend + offs_kpe,
-                mask=mask_n[None, :],
-                other=0.0,
-            )
-            qk += tl.dot(qpe, kpe)
 
         qk *= sm_scale
 
@@ -299,15 +266,8 @@ def extend_attention_fwd_int8kv(
         v_extend.shape[-1],
     )
 
-    if Lq == 576:
-        BLOCK_DMODEL = 512
-        BLOCK_DPE = 64
-    elif Lq == 288:
-        BLOCK_DMODEL = 256
-        BLOCK_DPE = 32
-    else:
-        BLOCK_DMODEL = triton.next_power_of_2(Lq)
-        BLOCK_DPE = 0
+    BLOCK_DMODEL = triton.next_power_of_2(Lq)
+    BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     if CUDA_CAPABILITY[0] >= 9:

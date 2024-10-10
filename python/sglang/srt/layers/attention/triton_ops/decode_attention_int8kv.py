@@ -360,12 +360,6 @@ def _fwd_grouped_kernel_stage1(
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
 
-    if BLOCK_DPE > 0:
-        offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
-        off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
-        )
-
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     block_stard_index = start_n * BLOCK_N
@@ -401,21 +395,6 @@ def _fwd_grouped_kernel_stage1(
         )
         k = k_int8.to(reduce_dtype) * k_scales  # Dequantize K
         qk = tl.dot(q, k)
-        if BLOCK_DPE > 0:
-            qpe = tl.load(Q + off_qpe + start_mark, mask=mask_h[:, None]).to(
-                reduce_dtype
-            )
-            offs_buf_kpe = (
-                k_loc[None, :] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_dpe[:, None]
-            )
-            kpe = tl.load(
-                K_Buffer + offs_buf_kpe,
-                mask=offs_n_new[None, :] < cur_batch_end_index,
-                other=0.0,
-            ).to(reduce_dtype)
-            qk += tl.dot(qpe, kpe)
         qk *= sm_scale
 
         if logit_cap > 0:
@@ -541,15 +520,8 @@ def _decode_grouped_att_m_fwd(
     BLOCK = 32
     Lq, Lk = q.shape[-1], k_buffer.shape[-1]
 
-    if Lk == 576:
-        BLOCK_DMODEL = 512
-        BLOCK_DPE = 64
-    elif Lk == 288:
-        BLOCK_DMODEL = 256
-        BLOCK_DPE = 32
-    else:
-        BLOCK_DMODEL = triton.next_power_of_2(Lk)
-        BLOCK_DPE = 0
+    BLOCK_DMODEL = triton.next_power_of_2(Lk)
+    BLOCK_DPE = 0
 
     batch, head_num = B_req_idx.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[1]
