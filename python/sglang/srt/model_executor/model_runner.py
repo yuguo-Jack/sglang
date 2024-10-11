@@ -124,8 +124,6 @@ class ModelRunner:
         # Init componnets
         min_per_gpu_memory = self.init_torch_distributed()
         self.sampler = Sampler()
-        # Monkey patch model loader
-        setattr(ModelRegistry, "load_model_cls", load_model_cls_srt)
         self.load_model()
         if server_args.lora_paths is not None:
             self.init_lora_manager()
@@ -223,7 +221,6 @@ class ModelRunner:
             model_config=self.vllm_model_config,
             load_config=self.load_config,
             device_config=self.device_config,
-            multimodal_config=None,
             parallel_config=None,
             scheduler_config=None,
             lora_config=None,
@@ -634,5 +631,5 @@ def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
     return model_arch_name_to_cls[model_arch]
 
 
-# # Monkey patch model loader
-# setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
+# Monkey patch model loader
+setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)
