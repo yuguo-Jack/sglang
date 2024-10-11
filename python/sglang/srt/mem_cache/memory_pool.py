@@ -242,6 +242,9 @@ class MHATokenToKVPool(BaseTokenToKVPool):
         cache_v: torch.Tensor,
     ):
         if self.dtype == torch.int8:
+            assert cache_k.dtype == torch.float16 and cache_v.dtype == torch.float16, (
+                "The KV cache in8/int4 only support attention type float16. "
+            )
             if self.kv_cache_dtype_str == "int4":
                 from sglang.srt.layers.attention.triton_ops.decode_attention_int4kv import (
                     destindex_copy_quantize_int4kv,
