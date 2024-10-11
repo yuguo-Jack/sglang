@@ -77,6 +77,7 @@ def _fwd_kernel_in8kv(
     cur_head = tl.program_id(1)
     cur_block_m = tl.program_id(2)
     cur_kv_head = cur_head // kv_group_num
+    scales_dtype = K_Scales_Buffer.dtype.element_ty
 
     cur_seq_len = tl.load(B_Seq_Len + cur_seq)
     cur_seq_len_extend = tl.load(B_Seq_Len_Extend + cur_seq)
@@ -137,7 +138,7 @@ def _fwd_kernel_in8kv(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=mask_n[None, :], other=1.0
         )
-        k = k_int8.to(tl.float16) * k_scales  # Dequantize K
+        k = k_int8.to(scales_dtype) * k_scales  # Dequantize K
 
         qk = tl.dot(q.to(k.dtype), k)
         
@@ -170,7 +171,7 @@ def _fwd_kernel_in8kv(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v = v_int8.to(tl.float16) * v_scales  # Dequantize V
+        v = v_int8.to(scales_dtype) * v_scales  # Dequantize V
 
         p = p.to(v.dtype)
         acc = acc * re_scale[:, None] + tl.dot(p, v)

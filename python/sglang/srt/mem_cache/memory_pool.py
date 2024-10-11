@@ -141,6 +141,7 @@ class MHATokenToKVPool(BaseTokenToKVPool):
         device: str,
         kv_cache_dtype_str: str,
         kvint4_groupsize: int,
+        torch_dtype: torch.dtype,
     ):
         super().__init__(size, dtype, device)
 
@@ -179,26 +180,26 @@ class MHATokenToKVPool(BaseTokenToKVPool):
                 assert head_dim % self.quant_group_size == 0, "error head dim, can not allocate int4 kv scales"
                 self.k_scales_buffer = [
                     torch.empty(
-                        (size + 1, head_num, head_dim // self.quant_group_size), dtype=torch.float16, device="cuda"
+                        (size + 1, head_num, head_dim // self.quant_group_size), dtype=torch_dtype, device="cuda"
                     )
                     for _ in range(layer_num)
                 ]
                 self.v_scales_buffer = [
                     torch.empty(
-                        (size + 1, head_num, head_dim // self.quant_group_size), dtype=torch.float16, device="cuda"
+                        (size + 1, head_num, head_dim // self.quant_group_size), dtype=torch_dtype, device="cuda"
                     )
                     for _ in range(layer_num)
                 ]
             else:
                 self.k_scales_buffer = [
                     torch.empty(
-                        (size + 1, head_num, 1), dtype=torch.float16, device="cuda"
+                        (size + 1, head_num, 1), dtype=torch_dtype, device="cuda"
                     )
                     for _ in range(layer_num)
                 ]
                 self.v_scales_buffer = [
                     torch.empty(
-                        (size + 1, head_num, 1), dtype=torch.float16, device="cuda"
+                        (size + 1, head_num, 1), dtype=torch_dtype, device="cuda"
                     )
                     for _ in range(layer_num)
                 ]

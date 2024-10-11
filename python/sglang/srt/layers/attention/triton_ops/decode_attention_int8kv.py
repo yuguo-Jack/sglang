@@ -61,6 +61,7 @@ def _fwd_kernel_stage1(
     cur_head = tl.program_id(1)
     start_n = tl.program_id(2)
     reduce_dtype = Att_Out.dtype.element_ty
+    scales_dtype = K_Scales_Buffer.dtype.element_ty
 
     cur_kv_head = cur_head // kv_group_num
 
@@ -105,7 +106,7 @@ def _fwd_kernel_stage1(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=1.0
         )
-        k = k_int8.to(reduce_dtype) * k_scales  # Dequantize K
+        k = (k_int8.to(scales_dtype) * k_scales).to(reduce_dtype)  # Dequantize K
         att_value = tl.sum(q[None, :] * k, 1)
         att_value *= sm_scale
 
@@ -141,6 +142,7 @@ def _fwd_kernel_stage2(
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
+    scales_dtype = V_Scales_Buffer.dtype.element_ty
 
     cur_kv_head = cur_head // kv_group_num
 
@@ -192,7 +194,9 @@ def _fwd_kernel_stage2(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v = v_int8.to(tl.float16) * v_scales  # Dequantize V
+        v = v_int8.to(scales_dtype) * v_scales  # Dequantize V
+
+        p = p.to(v.dtype)
         acc = acc * old_scale + tl.sum(p[:, None] * v, 0)
         e_max = n_e_max
 
@@ -336,6 +340,7 @@ def _fwd_grouped_kernel_stage1(
     cur_kv_head = tl.program_id(1)
     start_n = tl.program_id(2)
     reduce_dtype = Att_Out.dtype.element_ty
+    scales_dtype = K_Scales_Buffer.dtype.element_ty
 
     cur_head = cur_kv_head * kv_group_num + tl.arange(0, BLOCK_H)
     mask_h = cur_head < (cur_kv_head + 1) * kv_group_num
@@ -384,7 +389,7 @@ def _fwd_grouped_kernel_stage1(
         k_scales = tl.load(
             K_Scales_Buffer + offs_scales_k, mask=offs_n_new[None, :] < cur_batch_end_index, other=1.0
         )
-        k = k_int8.to(reduce_dtype) * k_scales  # Dequantize K
+        k = (k_int8.to(scales_dtype) * k_scales).to(reduce_dtype)  # Dequantize K
         qk = tl.dot(q, k)
         qk *= sm_scale
 
@@ -429,6 +434,7 @@ def _fwd_grouped_kernel_stage2(
 ):
     cur_batch = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
+    scales_dtype = V_Scales_Buffer.dtype.element_ty
 
     cur_head = cur_kv_head * kv_group_num + tl.arange(0, BLOCK_H)
     mask_h = cur_head < (cur_kv_head + 1) * kv_group_num
@@ -484,7 +490,7 @@ def _fwd_grouped_kernel_stage2(
         v_scales = tl.load(
             V_Scales_Buffer + offs_scales_v, mask=mask_n[:, None], other=1.0
         )
-        v = v_int8.to(tl.float16) * v_scales  # Dequantize V
+        v = v_int8.to(scales_dtype) * v_scales  # Dequantize V
         p = p.to(v.dtype)
         acc = acc * old_scale[:, None] + tl.dot(p, v)
         e_max = n_e_max
