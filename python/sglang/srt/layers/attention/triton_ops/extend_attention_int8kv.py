@@ -23,7 +23,6 @@ import triton
 import triton.language as tl
 
 CUDA_CAPABILITY = torch.cuda.get_device_capability()
-REDUCE_TRITON_TYPE = tl.float16
 
 @triton.jit
 def tanh(x):
