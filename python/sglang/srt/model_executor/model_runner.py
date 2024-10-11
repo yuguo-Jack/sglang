@@ -415,6 +415,11 @@ class ModelRunner:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )
+        
+        if self.server_args.kv_cache_dtype == "int8" or self.server_args.kv_cache_dtype == "int4":
+            assert self.dtype == torch.float16, (
+                "The KV cache in8/int4 only support torch type float16. "
+            )
 
         self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
         if max_total_tokens is not None:
