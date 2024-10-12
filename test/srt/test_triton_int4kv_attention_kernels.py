@@ -161,8 +161,8 @@ def _bwd_kernel_destindex_dequantize_int4_kv(
     high_4 = (q_data >> 4) & 0xF
 
     # 恢复 int4 到 [-7, 7] 的范围
-    src_data_0 = low_4.to(tl.float16) - 8
-    src_data_1 = high_4.to(tl.float16) - 8
+    src_data_0 = low_4.to(tl.int8) - 8
+    src_data_1 = high_4.to(tl.int8) - 8
 
     # 加载反量化比例因子（scale）
     scale = tl.load(Scale + dest_index * stride_s_bs + cur_head * stride_s_h + offs_g, mask=offs_g < group_size)
