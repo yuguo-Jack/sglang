@@ -229,8 +229,37 @@ class Scheduler:
         self.new_token_ratio_decay = global_config.new_token_ratio_decay
         self.batch_is_full = False
 
+    def gap_loop(self):
+        recv_reqs = self.recv_requests()
+        self.process_input_requests(recv_reqs)
+        new_batch = self.get_new_batch_prefill()
+        if new_batch is not None:
+            self.send_results() #try to send last decode result
+            result = self.run_batch(new_batch)
+            self.process_batch_result(new_batch, result)
+            self.send_results()
+        else:
+            if self.running_batch is not None:
+                batch = self.get_new_batch_decode()
+
+                if batch:
+                    result = self.run_batch(batch, self.send_results)
+                    self.process_batch_result(batch, result)
+
+                if self.running_batch.is_empty():
+                    self.running_batch = None
+            else:
+                self.send_results() #try to send last decode result
+                self.check_memory()
+                self.new_token_ratio = global_config.init_new_token_ratio
+
+        
+
     @torch.inference_mode()
     def event_loop(self):
+        if self.server_args.is_gap_schedule:
+            while True:
+                self.gap_loop()
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -619,12 +648,12 @@ class Scheduler:
         batch.prepare_for_decode()
         return batch
 
-    def run_batch(self, batch: ScheduleBatch):
+    def run_batch(self, batch: ScheduleBatch, gap_decode_schedule = None):
         if self.is_generation:
             if batch.forward_mode.is_decode() or batch.extend_num_tokens != 0:
                 model_worker_batch = batch.get_model_worker_batch()
                 logits_output, next_token_ids = self.tp_worker.forward_batch_generation(
-                    model_worker_batch
+                    model_worker_batch, gap_decode_schedule
                 )
             else:
                 logits_output = None

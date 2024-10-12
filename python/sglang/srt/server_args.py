@@ -44,6 +44,7 @@ class ServerArgs:
     served_model_name: Optional[str] = None
     chat_template: Optional[str] = None
     is_embedding: bool = False
+    is_gap_schedule: bool = False
 
     # Port
     host: str = "127.0.0.1"
@@ -251,6 +252,12 @@ class ServerArgs:
             default=ServerArgs.kvint4_groupsize,
             choices=[8, 16, 32, 64, 128],
             help="Kv cache int4 quantization group size, more smaller, acc more higher, mem occupancy of scales more higher. Defaults to 32",
+        )
+        parser.add_argument(
+            "--gap-schedule",
+            type=bool,
+            default=ServerArgs.is_gap_schedule,
+            help="select gap scheduling switch, defalult is False, based cuda graph.",
         )
         parser.add_argument(
             "--trust-remote-code",

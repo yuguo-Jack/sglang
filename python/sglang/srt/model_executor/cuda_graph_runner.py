@@ -238,7 +238,7 @@ class CudaGraphRunner:
         self.graph_memory_pool = graph.pool()
         return graph, out
 
-    def replay(self, forward_batch: ForwardBatch):
+    def replay(self, forward_batch: ForwardBatch, gap_decode_schedule = None):
         assert forward_batch.out_cache_loc is not None
         raw_bs = forward_batch.batch_size
 
@@ -262,6 +262,8 @@ class CudaGraphRunner:
 
         # Replay
         self.graphs[bs].replay()
+        if gap_decode_schedule is not None:
+            gap_decode_schedule()
         logits_output = self.output_buffers[bs]
 
         # Unpad
