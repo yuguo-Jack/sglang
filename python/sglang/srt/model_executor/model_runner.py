@@ -520,12 +520,12 @@ class ModelRunner:
         logger.info("Capture cuda graph begin. This can take up to several minutes.")
         self.cuda_graph_runner = CudaGraphRunner(self)
 
-    def forward_decode(self, forward_batch: ForwardBatch):
+    def forward_decode(self, forward_batch: ForwardBatch, gap_decode_schedule = None):
         if self.cuda_graph_runner and self.cuda_graph_runner.can_run(
             forward_batch.batch_size
         ):
-            return self.cuda_graph_runner.replay(forward_batch)
-
+            return self.cuda_graph_runner.replay(forward_batch, gap_decode_schedule)
+        gap_decode_schedule()
         return self.model.forward(
             forward_batch.input_ids, forward_batch.positions, forward_batch
         )
@@ -544,9 +544,9 @@ class ModelRunner:
                 get_embedding=True,
             )
 
-    def forward(self, forward_batch: ForwardBatch) -> LogitsProcessorOutput:
+    def forward(self, forward_batch: ForwardBatch, gap_decode_schedule = None) -> LogitsProcessorOutput:
         if forward_batch.forward_mode.is_decode():
-            return self.forward_decode(forward_batch)
+            return self.forward_decode(forward_batch, gap_decode_schedule)
         elif forward_batch.forward_mode.is_extend():
             return self.forward_extend(forward_batch)
         else:
