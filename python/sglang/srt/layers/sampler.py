@@ -2,11 +2,12 @@ import logging
 from typing import Union
 
 import torch
+from torch import nn
 from flashinfer.sampling import (
     min_p_sampling_from_probs,
     top_k_renorm_prob,
     top_k_top_p_sampling_from_probs,
-    top_p_renorm_prob,
+    top_p_renorm_prob,)
 
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 # TODO: move this dict to another place
