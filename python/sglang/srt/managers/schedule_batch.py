@@ -405,10 +405,12 @@ class ScheduleBatch:
     sampling_info: SamplingBatchInfo = None
 
     # Batched arguments to model runner
-    input_ids: List[int] = None
-    req_pool_indices: List[int] = None
-    seq_lens: List[int] = None
+    input_ids: torch.Tensor = None
+    req_pool_indices: torch.Tensor = None
+    seq_lens: torch.Tensor = None
     out_cache_loc: torch.Tensor = None
+
+    output_ids: torch.Tensor = None
 
     # For processing logprobs
     return_logprob: bool = False
@@ -422,6 +424,9 @@ class ScheduleBatch:
 
     # Stream
     has_stream: bool = False
+
+    # device
+    device: str = "cuda"
 
     # Has regex
     has_regex: bool = False
@@ -439,6 +444,7 @@ class ScheduleBatch:
             tree_cache=tree_cache,
             return_logprob=return_logprob,
             has_stream=has_stream,
+            device=req_to_token_pool.device,
             has_regex=has_regex,
         )
 
@@ -527,7 +533,9 @@ class ScheduleBatch:
         self.extend_lens = [r.extend_input_len for r in reqs]
         self.extend_logprob_start_lens = [r.extend_logprob_start_len for r in reqs]
 
-        self.sampling_info = SamplingBatchInfo.from_schedule_batch(self, vocab_size)
+        self.sampling_info = SamplingBatchInfo.from_schedule_batch(
+            self, vocab_size, global_server_args_dict["disable_penalizer"]
+        )
 
     def mix_with_running(self, running_batch: "ScheduleBatch"):
         self.forward_mode = ForwardMode.MIXED
@@ -582,9 +590,11 @@ class ScheduleBatch:
 
         retracted_reqs = []
         seq_lens_cpu = self.seq_lens.cpu().numpy()
+        first_iter = True
         while (
             self.token_to_kv_pool.available_size()
             < len(sorted_indices) * global_config.retract_decode_steps
+            or first_iter
         ):
             if len(sorted_indices) == 1:
                 # Corner case: only one request left
@@ -593,6 +603,7 @@ class ScheduleBatch:
                 ), "No space left for only one request"
                 break
 
+            first_iter = False
             idx = sorted_indices.pop()
             req = self.reqs[idx]
             retracted_reqs.append(req)
@@ -714,19 +725,12 @@ class ScheduleBatch:
 
         return jump_forward_reqs
 
-    def prepare_for_decode(self, input_ids=None):
+    def prepare_for_decode(self):
         self.forward_mode = ForwardMode.DECODE
 
-        if input_ids is None:
-            input_ids = [
-                r.output_ids[-1] if r.output_ids else r.origin_input_ids[-1]
-                for r in self.reqs
-            ]
-
-        self.input_ids = torch.tensor(
-            input_ids, dtype=torch.int32, device=self.seq_lens.device
-        )
+        self.input_ids = self.output_ids
         self.seq_lens.add_(1)
+        self.output_ids = None
 
         # Alloc mem
         bs = len(self.reqs)
@@ -753,6 +757,7 @@ class ScheduleBatch:
         self.req_pool_indices = self.req_pool_indices[new_indices]
         self.seq_lens = self.seq_lens[new_indices]
         self.out_cache_loc = None
+        self.output_ids = self.output_ids[new_indices]
         self.return_logprob = any(req.return_logprob for req in self.reqs)
         if self.return_logprob:
             self.top_logprobs_nums = [
@@ -777,6 +782,8 @@ class ScheduleBatch:
         )
         self.seq_lens = torch.concat([self.seq_lens, other.seq_lens])
         self.out_cache_loc = None
+        if self.output_ids is not None:
+            self.output_ids = torch.concat([self.output_ids, other.output_ids])
         if self.return_logprob and other.return_logprob:
             self.top_logprobs_nums.extend(other.top_logprobs_nums)
         elif self.return_logprob:
@@ -806,6 +813,8 @@ class ScheduleBatch:
             self.sampling_info.regex_fsm_states = [
                 req.regex_fsm_state for req in self.reqs
             ]
+        else:
+            self.sampling_info.regex_fsms = None
 
         return ModelWorkerBatch(
             forward_mode=self.forward_mode,
@@ -821,6 +830,24 @@ class ScheduleBatch:
             image_inputs=image_inputs,
             lora_paths=lora_paths,
             sampling_info=self.sampling_info,
+        )
+
+    def copy(self):
+        return ScheduleBatch(
+            reqs=self.reqs,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool=self.token_to_kv_pool,
+            tree_cache=self.tree_cache,
+            forward_mode=self.forward_mode,
+            output_ids=self.output_ids,
+            sampling_info=self.sampling_info,
+            decoding_reqs=self.decoding_reqs,
+        )
+
+    def __str__(self):
+        return (
+            f"ScheduleBatch(forward_mode={self.forward_mode.name}, "
+            f"#req={(len(self.reqs))})"
         )
 
 
