@@ -44,7 +44,7 @@ class ServerArgs:
     served_model_name: Optional[str] = None
     chat_template: Optional[str] = None
     is_embedding: bool = False
-    is_gap_schedule: bool = False
+    enable_gap_schedule: bool = False
 
     # Port
     host: str = "127.0.0.1"
@@ -254,9 +254,9 @@ class ServerArgs:
             help="Kv cache int4 quantization group size, more smaller, acc more higher, mem occupancy of scales more higher. Defaults to 32",
         )
         parser.add_argument(
-            "--gap-schedule",
+            "--enable-gap-schedule",
             type=bool,
-            default=ServerArgs.is_gap_schedule,
+            default=ServerArgs.enable_gap_schedule,
             help="select gap scheduling switch, defalult is False, based cuda graph.",
         )
         parser.add_argument(

@@ -257,7 +257,7 @@ class Scheduler:
 
     @torch.inference_mode()
     def event_loop(self):
-        if self.server_args.is_gap_schedule:
+        if self.server_args.enable_gap_schedule:
             while True:
                 self.gap_loop()
         while True:
